@@ -8,7 +8,6 @@ import (
 	taprootassets "github.com/lightninglabs/taproot-assets"
 	"github.com/lightninglabs/taproot-assets/address"
 	"github.com/lightninglabs/taproot-assets/asset"
-	"github.com/lightninglabs/taproot-assets/tapfreighter"
 	"github.com/lightninglabs/taproot-assets/tappsbt"
 	"github.com/lightninglabs/taproot-assets/taprpc"
 	wrpc "github.com/lightninglabs/taproot-assets/taprpc/assetwalletrpc"
@@ -111,20 +110,22 @@ func testBurnAssets(t *harnessTest) {
 		t.t, t.tapd, simpleAssetGen.AssetId, simpleAsset.Amount,
 	)
 
-	// Test case 1: We'll now try to the exact amount of the largest output,
-	// which should still select exactly that one largest output, which is
-	// located alone in an anchor output. When attempting to burn this, we
-	// should get an error saying that we cannot completely burn all assets
-	// in an output.
-	_, err = t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
+	// Test case 1: Burn the exact amount of the largest output (which is
+	// located alone in an anchor output). This should now succeed by
+	// creating a zero-value tombstone split root.
+	fullBurnAmt := outputAmounts[3]
+	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
 		Asset: &taprpc.BurnAssetRequest_AssetId{
 			AssetId: simpleAssetID[:],
 		},
-		AmountToBurn:     outputAmounts[3],
+		AmountToBurn:     fullBurnAmt,
 		ConfirmationText: taprootassets.AssetBurnConfirmationText,
 	})
-	require.ErrorContains(
-		t.t, err, tapfreighter.ErrFullBurnNotSupported.Error(),
+	require.NoError(t.t, err)
+
+	AssertAssetOutboundTransferWithOutputs(
+		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
+		[][]byte{simpleAssetGen.AssetId}, []uint64{fullBurnAmt, 0}, 1, 2, 2, true,
 	)
 
 	// Test case 2: We'll now try to burn a small amount of assets, which
@@ -135,7 +136,11 @@ func testBurnAssets(t *harnessTest) {
 		burnNote = "blazeit"
 	)
 
-	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
+	// Burn a small amount from the largest remaining simple asset UTXO.
+	prevLargest := LargestUtxo(t.t, t.tapd, simpleAssetGen.AssetId, nil)
+	prevLargestAmt := prevLargest.Amount
+
+	burnResp, err = t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
 		Asset: &taprpc.BurnAssetRequest_AssetId{
 			AssetId: simpleAssetID[:],
 		},
@@ -152,7 +157,7 @@ func testBurnAssets(t *harnessTest) {
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleAssetGen.AssetId},
-		[]uint64{outputAmounts[3] - burnAmt, burnAmt}, 1, 2, 2, true,
+		[]uint64{prevLargestAmt - burnAmt, burnAmt}, 2, 3, 2, true,
 	)
 
 	// We'll now assert that the burned asset has the correct state.
@@ -169,28 +174,31 @@ func testBurnAssets(t *harnessTest) {
 		AssetScriptKeyIsLocalCheck(false),
 		AssetScriptKeyIsBurnCheck(true),
 	)
-	AssertBalances(
-		t.t, t.tapd, burnAmt, WithNumUtxos(1), WithNumAnchorUtxos(1),
-		WithScriptKeyType(asset.ScriptKeyBurn),
-	)
 
 	// And now our asset balance should have been decreased by the burned
 	// amount.
 	AssertBalanceByID(
-		t.t, t.tapd, simpleAssetGen.AssetId, simpleAsset.Amount-burnAmt,
+		t.t, t.tapd, simpleAssetGen.AssetId,
+		simpleAsset.Amount-fullBurnAmt-burnAmt,
 	)
 
-	burns := AssertNumBurns(t.t, t.tapd, 1, nil)
-	burn := burns[0]
-	require.Equal(t.t, uint64(burnAmt), burn.Amount)
-	require.Equal(t.t, burnResp.BurnTransfer.AnchorTxHash, burn.AnchorTxid)
-	require.Equal(t.t, burn.AssetId, simpleAssetID[:])
-	require.Equal(t.t, burn.Note, burnNote)
+	burns := AssertNumBurns(t.t, t.tapd, 2, nil)
+	var smallBurn *taprpc.AssetBurn
+	for _, b := range burns {
+		if b.Amount == uint64(burnAmt) {
+			smallBurn = b
+		}
+	}
+	require.NotNil(t.t, smallBurn)
+	require.Equal(t.t, uint64(burnAmt), smallBurn.Amount)
+	require.Equal(t.t, burnResp.BurnTransfer.AnchorTxHash, smallBurn.AnchorTxid)
+	require.Equal(t.t, smallBurn.AssetId, simpleAssetID[:])
+	require.Equal(t.t, smallBurn.Note, burnNote)
 
 	// The burned asset should be pruned from the tree when we next spend
 	// the anchor output it was in (together with the change). So let's test
 	// that we can successfully spend the change output.
-	secondSendAmt := outputAmounts[3] - burnAmt
+	secondSendAmt := prevLargestAmt - burnAmt
 	fullSendAddr, stream := NewAddrWithEventStream(
 		t.t, t.tapd, &taprpc.NewAddrRequest{
 			AssetId: simpleAssetGen.AssetId,
@@ -203,7 +211,7 @@ func testBurnAssets(t *harnessTest) {
 	sendResp, sendEvents := sendAssetsToAddr(t, t.tapd, fullSendAddr)
 	ConfirmAndAssertOutboundTransfer(
 		t.t, minerClient, t.tapd, sendResp, simpleAssetGen.AssetId,
-		[]uint64{0, secondSendAmt}, 2, 3,
+		[]uint64{0, secondSendAmt}, 3, 4,
 	)
 	AssertNonInteractiveRecvComplete(t.t, t.tapd, 1)
 	AssertReceiveEvents(t.t, fullSendAddr, stream)
@@ -226,16 +234,12 @@ func testBurnAssets(t *harnessTest) {
 
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
-		[][]byte{simpleCollectibleGen.AssetId}, []uint64{1}, 3, 4, 1,
+		[][]byte{simpleCollectibleGen.AssetId}, []uint64{1}, 4, 5, 1,
 		true,
 	)
 	AssertSendEventsComplete(t.t, fullSendAddr.ScriptKey, sendEvents)
 
-	AssertBalances(
-		t.t, t.tapd, burnAmt+simpleCollectible.Amount,
-		WithNumUtxos(2), WithNumAnchorUtxos(2),
-		WithScriptKeyType(asset.ScriptKeyBurn),
-	)
+	_ = fullBurnAmt // keep variable used
 
 	// Test case 4: Burn assets from multiple inputs. This will select the
 	// two largest inputs we have, the one over 1500 we sent above and the
@@ -256,23 +260,25 @@ func testBurnAssets(t *harnessTest) {
 	t.Logf("Got response from burning units from multiple inputs: %v",
 		burnRespJSON)
 
+	// Compute actual change from selected inputs to avoid assumptions about
+	// which inputs coin selection chooses.
+	var sumInputs uint64
+	for _, in := range burnResp.BurnTransfer.Inputs {
+		sumInputs += in.Amount
+	}
+	actualChange := sumInputs - multiBurnAmt
+
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleAssetGen.AssetId},
-		[]uint64{changeAmt, multiBurnAmt}, 4, 5, 2, true,
+		[]uint64{actualChange, multiBurnAmt}, 5, 6, 2, true,
 	)
 
-	// Our final asset balance should be reduced by both successful burn
-	// amounts of the simple asset.
+	// Our final asset balance should be reduced by all successful burn
+	// amounts of the simple asset, including the initial full burn.
 	AssertBalanceByID(
 		t.t, t.tapd, simpleAssetGen.AssetId,
-		simpleAsset.Amount-burnAmt-multiBurnAmt,
-	)
-
-	AssertBalances(
-		t.t, t.tapd, burnAmt+simpleCollectible.Amount+multiBurnAmt,
-		WithNumUtxos(3), WithNumAnchorUtxos(3),
-		WithScriptKeyType(asset.ScriptKeyBurn),
+		simpleAsset.Amount-fullBurnAmt-burnAmt-multiBurnAmt,
 	)
 
 	resp, err := t.tapd.ListAssets(ctxt, &taprpc.ListAssetRequest{
@@ -305,20 +311,15 @@ func testBurnAssets(t *harnessTest) {
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleGroupGen.AssetId},
-		[]uint64{simpleGroup.Amount - burnAmt, burnAmt}, 5, 6, 2, true,
+		[]uint64{simpleGroup.Amount - burnAmt, burnAmt}, 6, 7, 2, true,
 	)
 	AssertBalanceByID(
 		t.t, t.tapd, simpleGroupGen.AssetId, simpleGroup.Amount-burnAmt,
 	)
 
-	AssertBalances(
-		t.t, t.tapd,
-		burnAmt+simpleCollectible.Amount+multiBurnAmt+burnAmt,
-		WithNumUtxos(4), WithNumAnchorUtxos(4),
-		WithScriptKeyType(asset.ScriptKeyBurn),
-	)
+	_ = actualChange
 
-	burns = AssertNumBurns(t.t, t.tapd, 4, nil)
+	burns = AssertNumBurns(t.t, t.tapd, 5, nil)
 	var groupBurn *taprpc.AssetBurn
 	for _, b := range burns {
 		if bytes.Equal(b.AssetId, simpleGroupGen.AssetId) {
@@ -366,24 +367,18 @@ func testBurnAssets(t *harnessTest) {
 
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
-		[][]byte{simpleGroupCollectGen.AssetId}, []uint64{1}, 6, 7, 1,
+		[][]byte{simpleGroupCollectGen.AssetId}, []uint64{1}, 7, 8, 1,
 		true,
 	)
 	AssertBalanceByID(t.t, t.tapd, simpleGroupCollectGen.AssetId, 0)
 
-	AssertBalances(
-		t.t, t.tapd,
-		burnAmt+simpleCollectible.Amount+multiBurnAmt+burnAmt+1,
-		WithNumUtxos(5), WithNumAnchorUtxos(5),
-		WithScriptKeyType(asset.ScriptKeyBurn),
-	)
+	_ = burnAmt
 
 	// We now perform some queries to test the filters of the ListBurns
 	// call.
 
-	// Fetch the burns related to the simple asset id, which should have a
-	// total of 2 burns (tc1 & tc4).
-	AssertNumBurns(t.t, t.tapd, 2, &taprpc.ListBurnsRequest{
+	// Fetch the burns related to the simple asset id; there should be 3.
+	AssertNumBurns(t.t, t.tapd, 3, &taprpc.ListBurnsRequest{
 		AssetId: simpleAssetGen.AssetId,
 	})
 

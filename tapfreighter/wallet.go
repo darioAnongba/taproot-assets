@@ -823,12 +823,11 @@ func (f *AssetWallet) FundBurn(ctx context.Context,
 	if len(fundedPkt.VPackets[0].Outputs) == 1 &&
 		firstOut.Amount == fundDesc.Amount {
 
-		// A burn is an interactive transfer. So we don't expect there
-		// to be a tombstone unless there are passive assets in the same
-		// commitment, in which case the wallet has marked the change
-		// output as tappsbt.TypePassiveSplitRoot. If that's not the
-		// case, we'll return as burning all assets in an anchor output
-		// is not supported.
+		// A burn is an interactive transfer. If there are no other
+		// assets in the same commitment, then this is a whole-UTXO burn.
+		// In that case, create a zero-value NUMS tombstone output as the
+		// split root to properly anchor the split commitment and allow a
+		// full-value burn.
 		otherAssets, err := hasOtherAssets(
 			fundedPkt.InputCommitments, fundedPkt.VPackets,
 		)
@@ -837,7 +836,33 @@ func (f *AssetWallet) FundBurn(ctx context.Context,
 		}
 
 		if !otherAssets {
-			return nil, ErrFullBurnNotSupported
+			vPkt := fundedPkt.VPackets[0]
+
+			// Append a zero-amount tombstone split-root output to the
+			// same anchor output index as the burn output. Use the same
+			// anchor internal key.
+			tomb := &tappsbt.VOutput{
+				Amount:            0,
+				AssetVersion:      maxVersion,
+				Type:              tappsbt.TypeSplitRoot,
+				Interactive:       false,
+				AnchorOutputIndex: vPkt.Outputs[0].AnchorOutputIndex + 1,
+				ScriptKey:         asset.NUMSScriptKey,
+			}
+			tomb.SetAnchorInternalKey(newInternalKey, f.cfg.ChainParams.HDCoinType)
+
+			// Force a split by disabling the interactive fast-path on the
+			// burn output and adding the split root output above.
+			vPkt.Outputs[0].Interactive = false
+			vPkt.Outputs = append(vPkt.Outputs, tomb)
+
+			// Re-prepare outputs to build the split commitment and assign
+			// the proper root/split assets.
+			if err := tapsend.PrepareOutputAssets(ctx, vPkt); err != nil {
+				log.Errorf("Error preparing outputs (burn tombstone): %v, packets: %v",
+					err, limitSpewer.Sdump(vPkt))
+				return nil, fmt.Errorf("unable to prepare outputs: %w", err)
+			}
 		}
 	}
 
