@@ -8,7 +8,6 @@ import (
 	taprootassets "github.com/lightninglabs/taproot-assets"
 	"github.com/lightninglabs/taproot-assets/address"
 	"github.com/lightninglabs/taproot-assets/asset"
-	"github.com/lightninglabs/taproot-assets/tapfreighter"
 	"github.com/lightninglabs/taproot-assets/tappsbt"
 	"github.com/lightninglabs/taproot-assets/taprpc"
 	wrpc "github.com/lightninglabs/taproot-assets/taprpc/assetwalletrpc"
@@ -111,21 +110,36 @@ func testBurnAssets(t *harnessTest) {
 		t.t, t.tapd, simpleAssetGen.AssetId, simpleAsset.Amount,
 	)
 
-	// Test case 1: We'll now try to the exact amount of the largest output,
+	// Test case 1: We'll now try to burn the exact amount of the largest output,
 	// which should still select exactly that one largest output, which is
-	// located alone in an anchor output. When attempting to burn this, we
-	// should get an error saying that we cannot completely burn all assets
-	// in an output.
-	_, err = t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
+	// located alone in an anchor output. With the new tombstone support,
+	// this should now succeed by creating a tombstone output.
+	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
 		Asset: &taprpc.BurnAssetRequest_AssetId{
 			AssetId: simpleAssetID[:],
 		},
 		AmountToBurn:     outputAmounts[3],
 		ConfirmationText: taprootassets.AssetBurnConfirmationText,
 	})
-	require.ErrorContains(
-		t.t, err, tapfreighter.ErrFullBurnNotSupported.Error(),
-	)
+	require.NoError(t.t, err)
+	require.NotNil(t.t, burnResp.BurnTransfer)
+	require.NotNil(t.t, burnResp.BurnProof)
+	
+	// Verify that the burn transfer has two outputs: the burn output and a tombstone
+	require.Len(t.t, burnResp.BurnTransfer.Outputs, 2)
+	
+	// The first output should be the burn output
+	burnOutput := burnResp.BurnTransfer.Outputs[0]
+	require.Equal(t.t, outputAmounts[3], burnOutput.Amount)
+	
+	// The second output should be the tombstone output
+	tombstoneOutput := burnResp.BurnTransfer.Outputs[1]
+	require.Equal(t.t, uint64(0), tombstoneOutput.Amount)
+	require.Equal(t.t, asset.NUMSBytes, tombstoneOutput.ScriptKey)
+	
+	// Verify the burn proof contains the correct burn information
+	require.True(t.t, burnResp.BurnProof.IsBurn)
+	require.Equal(t.t, outputAmounts[3], burnResp.BurnProof.Asset.Amount)
 
 	// Test case 2: We'll now try to burn a small amount of assets, which
 	// should select the largest output, which is located alone in an anchor
@@ -135,7 +149,7 @@ func testBurnAssets(t *harnessTest) {
 		burnNote = "blazeit"
 	)
 
-	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
+	burnResp2, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
 		Asset: &taprpc.BurnAssetRequest_AssetId{
 			AssetId: simpleAssetID[:],
 		},
@@ -145,18 +159,18 @@ func testBurnAssets(t *harnessTest) {
 	})
 	require.NoError(t.t, err)
 
-	burnRespJSON, err := formatProtoJSON(burnResp)
+	burnRespJSON, err := formatProtoJSON(burnResp2)
 	require.NoError(t.t, err)
 	t.Logf("Got response from burning %d units: %v", burnAmt, burnRespJSON)
 
 	AssertAssetOutboundTransferWithOutputs(
-		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
+		t.t, minerClient, t.tapd, burnResp2.BurnTransfer,
 		[][]byte{simpleAssetGen.AssetId},
 		[]uint64{outputAmounts[3] - burnAmt, burnAmt}, 1, 2, 2, true,
 	)
 
 	// We'll now assert that the burned asset has the correct state.
-	burnedAsset := burnResp.BurnProof.Asset
+	burnedAsset := burnResp2.BurnProof.Asset
 	allAssets, err := t.tapd.ListAssets(ctxt, &taprpc.ListAssetRequest{
 		IncludeSpent:  true,
 		ScriptKeyType: allScriptKeysQuery,

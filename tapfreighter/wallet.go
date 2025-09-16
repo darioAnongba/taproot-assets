@@ -58,10 +58,6 @@ var (
 		0x4f, 0xb7, 0x4e, 0xc2, 0xad, 0x6e, 0x11, 0xd7,
 	}
 
-	// ErrFullBurnNotSupported is returned when we attempt to burn all
-	// assets of an anchor output, which is not supported.
-	ErrFullBurnNotSupported = errors.New("burning all assets of an " +
-		"anchor output is not supported")
 )
 
 // Wallet is an interface for funding and signing asset transfers.
@@ -817,8 +813,8 @@ func (f *AssetWallet) FundBurn(ctx context.Context,
 
 	// We want to avoid a BTC output being created that just sits there
 	// without an actual commitment in it. So if we are not getting any
-	// change or passive assets in this output, we'll not want to go through
-	// with it.
+	// change or passive assets in this output, we need to create a tombstone
+	// output to carry the witness for the burn operation.
 	firstOut := fundedPkt.VPackets[0].Outputs[0]
 	if len(fundedPkt.VPackets[0].Outputs) == 1 &&
 		firstOut.Amount == fundDesc.Amount {
@@ -827,8 +823,7 @@ func (f *AssetWallet) FundBurn(ctx context.Context,
 		// to be a tombstone unless there are passive assets in the same
 		// commitment, in which case the wallet has marked the change
 		// output as tappsbt.TypePassiveSplitRoot. If that's not the
-		// case, we'll return as burning all assets in an anchor output
-		// is not supported.
+		// case, we need to create a tombstone output for the burn.
 		otherAssets, err := hasOtherAssets(
 			fundedPkt.InputCommitments, fundedPkt.VPackets,
 		)
@@ -837,7 +832,38 @@ func (f *AssetWallet) FundBurn(ctx context.Context,
 		}
 
 		if !otherAssets {
-			return nil, ErrFullBurnNotSupported
+			// Create a tombstone output to carry the witness for the burn
+			// operation. This allows us to burn all assets in an anchor output.
+			tombstoneOutput := &tappsbt.VOutput{
+				Amount:            0, // Zero amount for tombstone
+				Type:              tappsbt.TypeSplitRoot,
+				Interactive:       true,
+				AnchorOutputIndex: 0,
+				AssetVersion:      firstOut.AssetVersion,
+				ScriptKey:         asset.NUMSScriptKey, // Use NUMS key for tombstone
+			}
+			
+			// Get the anchor key descriptor from the burn output
+			anchorKeyDesc, err := firstOut.AnchorKeyToDesc()
+			if err != nil {
+				// If we can't get the key descriptor, create a simple one
+				// with just the public key
+				anchorKeyDesc = keychain.KeyDescriptor{
+					PubKey: firstOut.AnchorOutputInternalKey,
+				}
+			}
+			
+			// Set the same anchor internal key as the burn output
+			tombstoneOutput.SetAnchorInternalKey(
+				anchorKeyDesc, 
+				f.cfg.ChainParams.HDCoinType,
+			)
+			
+			// Add the tombstone output to the packet
+			fundedPkt.VPackets[0].Outputs = append(
+				fundedPkt.VPackets[0].Outputs, 
+				tombstoneOutput,
+			)
 		}
 	}
 
