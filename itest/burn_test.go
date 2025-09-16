@@ -110,24 +110,6 @@ func testBurnAssets(t *harnessTest) {
 		t.t, t.tapd, simpleAssetGen.AssetId, simpleAsset.Amount,
 	)
 
-	// Test case 1: Burn the exact amount of the largest output (which is
-	// located alone in an anchor output). This should now succeed by
-	// creating a zero-value tombstone split root.
-	fullBurnAmt := outputAmounts[3]
-	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
-		Asset: &taprpc.BurnAssetRequest_AssetId{
-			AssetId: simpleAssetID[:],
-		},
-		AmountToBurn:     fullBurnAmt,
-		ConfirmationText: taprootassets.AssetBurnConfirmationText,
-	})
-	require.NoError(t.t, err)
-
-	AssertAssetOutboundTransferWithOutputs(
-		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
-		[][]byte{simpleAssetGen.AssetId}, []uint64{fullBurnAmt, 0}, 1, 2, 2, true,
-	)
-
 	// Test case 2: We'll now try to burn a small amount of assets, which
 	// should select the largest output, which is located alone in an anchor
 	// output.
@@ -140,7 +122,7 @@ func testBurnAssets(t *harnessTest) {
 	prevLargest := LargestUtxo(t.t, t.tapd, simpleAssetGen.AssetId, nil)
 	prevLargestAmt := prevLargest.Amount
 
-	burnResp, err = t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
+	burnResp, err := t.tapd.BurnAsset(ctxt, &taprpc.BurnAssetRequest{
 		Asset: &taprpc.BurnAssetRequest_AssetId{
 			AssetId: simpleAssetID[:],
 		},
@@ -157,7 +139,7 @@ func testBurnAssets(t *harnessTest) {
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleAssetGen.AssetId},
-		[]uint64{prevLargestAmt - burnAmt, burnAmt}, 2, 3, 2, true,
+		[]uint64{prevLargestAmt - burnAmt, burnAmt}, 1, 2, 2, true,
 	)
 
 	// We'll now assert that the burned asset has the correct state.
@@ -179,10 +161,10 @@ func testBurnAssets(t *harnessTest) {
 	// amount.
 	AssertBalanceByID(
 		t.t, t.tapd, simpleAssetGen.AssetId,
-		simpleAsset.Amount-fullBurnAmt-burnAmt,
+		simpleAsset.Amount-burnAmt,
 	)
 
-	burns := AssertNumBurns(t.t, t.tapd, 2, nil)
+	burns := AssertNumBurns(t.t, t.tapd, 1, nil)
 	var smallBurn *taprpc.AssetBurn
 	for _, b := range burns {
 		if b.Amount == uint64(burnAmt) {
@@ -211,7 +193,7 @@ func testBurnAssets(t *harnessTest) {
 	sendResp, sendEvents := sendAssetsToAddr(t, t.tapd, fullSendAddr)
 	ConfirmAndAssertOutboundTransfer(
 		t.t, minerClient, t.tapd, sendResp, simpleAssetGen.AssetId,
-		[]uint64{0, secondSendAmt}, 3, 4,
+		[]uint64{0, secondSendAmt}, 2, 3,
 	)
 	AssertNonInteractiveRecvComplete(t.t, t.tapd, 1)
 	AssertReceiveEvents(t.t, fullSendAddr, stream)
@@ -234,12 +216,10 @@ func testBurnAssets(t *harnessTest) {
 
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
-		[][]byte{simpleCollectibleGen.AssetId}, []uint64{1}, 4, 5, 1,
+		[][]byte{simpleCollectibleGen.AssetId}, []uint64{1}, 3, 4, 1,
 		true,
 	)
 	AssertSendEventsComplete(t.t, fullSendAddr.ScriptKey, sendEvents)
-
-	_ = fullBurnAmt // keep variable used
 
 	// Test case 4: Burn assets from multiple inputs. This will select the
 	// two largest inputs we have, the one over 1500 we sent above and the
@@ -271,14 +251,14 @@ func testBurnAssets(t *harnessTest) {
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleAssetGen.AssetId},
-		[]uint64{actualChange, multiBurnAmt}, 5, 6, 2, true,
+		[]uint64{actualChange, multiBurnAmt}, 4, 5, 2, true,
 	)
 
 	// Our final asset balance should be reduced by all successful burn
-	// amounts of the simple asset, including the initial full burn.
+	// amounts of the simple asset.
 	AssertBalanceByID(
 		t.t, t.tapd, simpleAssetGen.AssetId,
-		simpleAsset.Amount-fullBurnAmt-burnAmt-multiBurnAmt,
+		simpleAsset.Amount-burnAmt-multiBurnAmt,
 	)
 
 	resp, err := t.tapd.ListAssets(ctxt, &taprpc.ListAssetRequest{
@@ -311,7 +291,7 @@ func testBurnAssets(t *harnessTest) {
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
 		[][]byte{simpleGroupGen.AssetId},
-		[]uint64{simpleGroup.Amount - burnAmt, burnAmt}, 6, 7, 2, true,
+		[]uint64{simpleGroup.Amount - burnAmt, burnAmt}, 5, 6, 2, true,
 	)
 	AssertBalanceByID(
 		t.t, t.tapd, simpleGroupGen.AssetId, simpleGroup.Amount-burnAmt,
@@ -319,7 +299,7 @@ func testBurnAssets(t *harnessTest) {
 
 	_ = actualChange
 
-	burns = AssertNumBurns(t.t, t.tapd, 5, nil)
+	burns = AssertNumBurns(t.t, t.tapd, 4, nil)
 	var groupBurn *taprpc.AssetBurn
 	for _, b := range burns {
 		if bytes.Equal(b.AssetId, simpleGroupGen.AssetId) {
@@ -367,7 +347,7 @@ func testBurnAssets(t *harnessTest) {
 
 	AssertAssetOutboundTransferWithOutputs(
 		t.t, minerClient, t.tapd, burnResp.BurnTransfer,
-		[][]byte{simpleGroupCollectGen.AssetId}, []uint64{1}, 7, 8, 1,
+		[][]byte{simpleGroupCollectGen.AssetId}, []uint64{1}, 6, 7, 1,
 		true,
 	)
 	AssertBalanceByID(t.t, t.tapd, simpleGroupCollectGen.AssetId, 0)
@@ -377,8 +357,8 @@ func testBurnAssets(t *harnessTest) {
 	// We now perform some queries to test the filters of the ListBurns
 	// call.
 
-	// Fetch the burns related to the simple asset id; there should be 3.
-	AssertNumBurns(t.t, t.tapd, 3, &taprpc.ListBurnsRequest{
+	// Fetch the burns related to the simple asset id; there should be 2.
+	AssertNumBurns(t.t, t.tapd, 2, &taprpc.ListBurnsRequest{
 		AssetId: simpleAssetGen.AssetId,
 	})
 

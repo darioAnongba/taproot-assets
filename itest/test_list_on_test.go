@@ -306,6 +306,10 @@ var allTestCases = []*testCase{
 		test: testBurnAssets,
 	},
 	{
+		name: "burn full utxo",
+		test: testFullBurnUTXO,
+	},
+	{
 		name: "burn grouped assets",
 		test: testBurnGroupedAssets,
 	},
